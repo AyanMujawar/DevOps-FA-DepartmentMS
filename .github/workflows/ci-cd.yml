@@ -211,7 +211,7 @@ jobs:
       - name: Start the whole app (database + backend + frontend + proxy)
         run: docker compose up -d --no-build --wait --wait-timeout 240
       - name: Smoke test (a whole user journey)
-        run: ./scripts/smoke_test.sh http://localhost
+        run: bash scripts/smoke_test.sh http://localhost
       - name: Start the monitoring stack and check Prometheus sees the backend
         run: |
           docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d --no-build
@@ -252,12 +252,12 @@ jobs:
         run: |
           prefix="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/campus-connect"
           export BACKEND_IMAGE="${prefix}-backend:ci" FRONTEND_IMAGE="${prefix}-frontend:ci" PROXY_IMAGE="${prefix}-proxy:ci"
-          ./scripts/k8s-deploy.sh
+          bash scripts/k8s-deploy.sh
       - name: Smoke test through a port-forward
         run: |
           kubectl port-forward -n campus-connect svc/proxy 8080:80 &
           sleep 5
-          ./scripts/smoke_test.sh http://localhost:8080
+          bash scripts/smoke_test.sh http://localhost:8080
       - name: Show the cluster state if something failed
         if: failure()
         run: |
@@ -351,7 +351,7 @@ jobs:
       - name: Smoke test the live site
         id: smoke
         if: env.EC2_HOST != ''
-        run: ./scripts/smoke_test.sh "http://${EC2_HOST}"
+        run: bash scripts/smoke_test.sh "http://${EC2_HOST}"
 
       - name: Roll back to the previous version if the live smoke test failed
         if: failure() && steps.smoke.outcome == 'failure' && steps.previous.outputs.tag != ''

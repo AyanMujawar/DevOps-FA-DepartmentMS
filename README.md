@@ -157,7 +157,7 @@ Needs Docker Desktop.
 cp .env.example .env                                              # first time only
 docker compose up --build -d                                       # the app
 docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up --build -d   # app + monitoring
-./scripts/smoke_test.sh http://localhost                           # verify
+bash scripts/smoke_test.sh http://localhost                           # verify
 ```
 
 | What | URL |
@@ -265,7 +265,7 @@ If the error budget is used up, new features stop and reliability work comes fir
      (`instance_type` in Terraform).
    - Bad deploy: redeploy the previous image tag with Ansible (`-e image_tag=<old-sha>`). The pipeline does this
      by itself when the live smoke test fails.
-4. **Recover and verify.** Run `./scripts/smoke_test.sh http://<server-ip>`.
+4. **Recover and verify.** Run `bash scripts/smoke_test.sh http://<server-ip>`.
 5. **Write a post-mortem** within two days, blameless (about the system, not the person).
 
 ### Security measures
