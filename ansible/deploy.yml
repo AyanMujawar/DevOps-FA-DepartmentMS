@@ -152,14 +152,17 @@
       when: registry_token | length > 0
       changed_when: false
 
-    - name: Pull the exact image versions that passed the pipeline
-      ansible.builtin.command: docker compose {{ compose_files }} pull backend frontend proxy
+    # Pull everything first (the tested app images and the monitoring images), so downloading and unpacking
+    # images is not happening while the containers are starting.
+    - name: Pull all images (the tested app images and the monitoring images)
+      ansible.builtin.command: docker compose {{ compose_files }} pull
       args:
         chdir: "{{ app_dir }}"
       changed_when: false
 
-    - name: Start (or update) all containers - nothing is built on the server
-      ansible.builtin.command: docker compose {{ compose_files }} up -d --no-build --remove-orphans
+    # Start in two stages so a small server is never asked to start every container at the same moment.
+    - name: Start the application containers first - nothing is built on the server
+      ansible.builtin.command: docker compose {{ compose_files }} up -d --no-build --remove-orphans mongodb backend frontend proxy
       args:
         chdir: "{{ app_dir }}"
 
@@ -171,6 +174,11 @@
       retries: 30
       delay: 5
       until: ready_check.status == 200
+
+    - name: Start the monitoring containers
+      ansible.builtin.command: docker compose {{ compose_files }} up -d --no-build
+      args:
+        chdir: "{{ app_dir }}"
 
     - name: Show running containers
       ansible.builtin.command:
