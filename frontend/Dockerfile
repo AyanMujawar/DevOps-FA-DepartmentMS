@@ -28,6 +28,10 @@ WORKDIR /app
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
 
+# The running server does not need npm; the copy bundled in the base image carries vulnerable
+# libraries (flagged by the Trivy scan in CI), so it is removed.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+
 # Run as the unprivileged "node" user
 RUN chown -R node:node /app
 USER node

@@ -161,6 +161,7 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
       - name: Scan the frontend image (Trivy)
+        if: success() || failure()
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.names.outputs.prefix }}-frontend:ci
@@ -168,6 +169,7 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
       - name: Scan the proxy image (Trivy)
+        if: success() || failure()
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.names.outputs.prefix }}-proxy:ci
