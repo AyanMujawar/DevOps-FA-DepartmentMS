@@ -1,0 +1,52 @@
+# The single entry point of the application (port 80).
+#   /api/*      -> Express backend
+#   /uploads/*  -> Express backend (course materials)
+#   /metrics    -> blocked (Prometheus reads it inside the Docker network, nobody else should)
+#   everything  -> Next.js frontend
+#
+# ${DNS_RESOLVER} is 127.0.0.11 under Docker Compose and the cluster DNS under Kubernetes.
+# Using a resolver plus variables makes nginx look the names up again at request time,
+# so a restarted backend container is found again without restarting nginx.
+
+server {
+    listen 80;
+    server_name _;
+
+    client_max_body_size 12m;          # course materials are limited to 10 MB by the backend
+
+    resolver ${DNS_RESOLVER} valid=10s ipv6=off;
+    set $backend_upstream  http://backend:4000;
+    set $frontend_upstream http://frontend:3000;
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    location = /metrics {
+        return 404;
+    }
+
+    location /api/ {
+        proxy_pass $backend_upstream;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Request-ID $request_id;
+    }
+
+    location /uploads/ {
+        proxy_pass $backend_upstream;
+        proxy_set_header Host $http_host;
+    }
+
+    location / {
+        proxy_pass $frontend_upstream;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

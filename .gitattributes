@@ -1,0 +1,8 @@
+# Keep line endings as LF in the repository and on Linux servers.
+# Shell scripts and YAML break if Windows turns them into CRLF.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.pdf binary
+*.docx binary
+*.ico binary

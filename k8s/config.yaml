@@ -1,0 +1,23 @@
+# ConfigMap = normal settings, Secret = sensitive values.
+# NOTE: the Secret values are demo defaults so the test cluster can start. For a real deployment
+# create the Secret from the command line (kubectl create secret generic ...) so real passwords
+# never go into git.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: campus-connect-config
+  namespace: campus-connect
+data:
+  NODE_ENV: production
+  PORT: "4000"
+  MONGODB_URI: mongodb://mongodb:27017/departmentMS
+  FRONTEND_URL: http://localhost
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: campus-connect-secret
+  namespace: campus-connect
+type: Opaque
+stringData:
+  JWT_SECRET: demo-jwt-signing-key-for-the-test-cluster

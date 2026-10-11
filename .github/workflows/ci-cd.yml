@@ -1,0 +1,369 @@
+# CI/CD pipeline for Campus Connect (Department Management System).
+#
+#   every push / pull request :  test + security + iac-check -> build and scan images -> compose-test + k8s-test
+#   push to main only         :  ... -> publish the tested images to GHCR -> deploy to AWS with Ansible -> smoke test
+#                                        (a failed live smoke test rolls back to the previous version)
+#
+# Stages from the syllabus:  Source (GitHub) -> Build -> Test -> Containerize -> Deploy -> Monitor
+#
+# The images are built ONCE (job "build"), scanned, tested in Compose and in Kubernetes, and then the very
+# same images are pushed to the registry and deployed. Nothing is rebuilt along the way.
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push cancels a superseded run on a branch, but never interrupts a deploy running on main
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # ---------------------------------------------------------------- 1. TEST
+  test:
+    name: Lint and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+      - name: Backend lint (ESLint)
+        working-directory: backend
+        run: npm run lint
+      - name: Backend unit tests (coverage must stay at or above 85%)
+        working-directory: backend
+        run: npm test
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Frontend lint (ESLint)
+        working-directory: frontend
+        run: npm run lint
+
+  # ---------------------------------------------------------------- 2. SECURITY (DevSecOps)
+  security:
+    name: Security scan of the code and dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+      # Static analysis of our own source code (the JavaScript counterpart of Bandit)
+      - name: Static security analysis (eslint-plugin-security)
+        working-directory: backend
+        run: npm run lint:security
+      # npm audit checks every library we ship against a database of known vulnerabilities
+      - name: Backend dependencies (fail on HIGH or CRITICAL)
+        working-directory: backend
+        run: npm audit --omit=dev --audit-level=high
+      # The frontend still has one known issue inside Next.js itself whose fix needs a major upgrade (Next 16),
+      # so this scan fails on CRITICAL only. See the README "Known limits".
+      - name: Frontend dependencies (fail on CRITICAL)
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=critical
+
+  # ---------------------------------------------------------------- 3. INFRASTRUCTURE CHECK
+  iac-check:
+    name: Validate Terraform, Ansible, Compose, Kubernetes and Prometheus config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform format and validate
+        working-directory: terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+      - name: Ansible playbook syntax
+        run: |
+          pip install ansible-core
+          printf '[web]\n127.0.0.1\n' > /tmp/inventory.ini
+          ansible-playbook -i /tmp/inventory.ini ansible/deploy.yml --syntax-check
+      - name: Docker Compose files
+        run: |
+          cp .env.example .env
+          docker compose -f docker-compose.yml -f docker-compose.monitoring.yml config -q
+      - name: Kubernetes manifests render
+        run: kubectl kustomize k8s > /dev/null
+      - name: Prometheus config and alert rules
+        run: |
+          docker run --rm --entrypoint promtool -v "$PWD/monitoring/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v2.54.1 check config /etc/prometheus/prometheus.yml
+
+  # ---------------------------------------------------------------- 4. BUILD ONCE, SCAN, HAND ON
+  build:
+    name: Build and scan the images
+    needs: [test, security]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Registry names must be lowercase; the same names are used locally and when pushing
+      - name: Work out the image names
+        id: names
+        run: echo "prefix=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/campus-connect" >> "$GITHUB_OUTPUT"
+
+      - name: Build the backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          load: true
+          tags: ${{ steps.names.outputs.prefix }}-backend:ci
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+      - name: Build the frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          load: true
+          tags: ${{ steps.names.outputs.prefix }}-frontend:ci
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+      - name: Build the nginx proxy image
+        uses: docker/build-push-action@v6
+        with:
+          context: nginx
+          load: true
+          tags: ${{ steps.names.outputs.prefix }}-proxy:ci
+
+      # Only CRITICAL vulnerabilities that already have a fix fail the build
+      - name: Scan the backend image (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.names.outputs.prefix }}-backend:ci
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Scan the frontend image (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.names.outputs.prefix }}-frontend:ci
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Scan the proxy image (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.names.outputs.prefix }}-proxy:ci
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Save the scanned images for the next jobs
+        run: |
+          docker save \
+            ${{ steps.names.outputs.prefix }}-backend:ci \
+            ${{ steps.names.outputs.prefix }}-frontend:ci \
+            ${{ steps.names.outputs.prefix }}-proxy:ci \
+            -o images.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: images
+          path: images.tar
+          retention-days: 1
+
+  # ---------------------------------------------------------------- 5a. INTEGRATION TEST (Docker Compose)
+  compose-test:
+    name: Integration test with Docker Compose
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: images
+      - run: docker load -i images.tar
+
+      - name: Create the .env file and work out the image names
+        run: |
+          grep -v -E '^(REGISTRY|IMAGE_TAG)=' .env.example > .env
+          echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> .env
+          echo "IMAGE_TAG=ci" >> .env
+
+      - name: Start the whole app (database + backend + frontend + proxy)
+        run: docker compose up -d --no-build --wait --wait-timeout 240
+      - name: Smoke test (a whole user journey)
+        run: ./scripts/smoke_test.sh http://localhost
+      - name: Start the monitoring stack and check Prometheus sees the backend
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d --no-build
+          for i in $(seq 1 30); do
+            up=$(curl -s 'http://localhost:9090/api/v1/query?query=up%7Bjob%3D%22backend%22%7D' | grep -o '"value":\[[^]]*"1"\]' || true)
+            [ -n "$up" ] && echo "Prometheus is scraping the backend" && exit 0
+            sleep 5
+          done
+          echo "Prometheus never saw the backend as up"; exit 1
+      - name: Show the logs if something failed
+        if: failure()
+        run: docker compose -f docker-compose.yml -f docker-compose.monitoring.yml logs --tail=80
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.monitoring.yml down -v
+
+  # ---------------------------------------------------------------- 5b. INTEGRATION TEST (Kubernetes)
+  k8s-test:
+    name: Integration test on Kubernetes (kind)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: images
+      - run: docker load -i images.tar
+      - name: Create a temporary Kubernetes cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: campus-connect
+      - name: Load the tested images into the cluster
+        run: |
+          prefix="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/campus-connect"
+          kind load docker-image --name campus-connect \
+            "${prefix}-backend:ci" "${prefix}-frontend:ci" "${prefix}-proxy:ci"
+      - name: Deploy the manifests in k8s/
+        run: |
+          prefix="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/campus-connect"
+          export BACKEND_IMAGE="${prefix}-backend:ci" FRONTEND_IMAGE="${prefix}-frontend:ci" PROXY_IMAGE="${prefix}-proxy:ci"
+          ./scripts/k8s-deploy.sh
+      - name: Smoke test through a port-forward
+        run: |
+          kubectl port-forward -n campus-connect svc/proxy 8080:80 &
+          sleep 5
+          ./scripts/smoke_test.sh http://localhost:8080
+      - name: Show the cluster state if something failed
+        if: failure()
+        run: |
+          kubectl get all -n campus-connect
+          kubectl describe pods -n campus-connect | tail -80
+          kubectl logs -n campus-connect deployment/backend --tail=60 || true
+
+  # ---------------------------------------------------------------- 6. DEPLOY (main branch only)
+  deploy:
+    name: Publish images and deploy to AWS
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build, compose-test, k8s-test, iac-check]
+    runs-on: ubuntu-latest
+    environment: production        # approvals can be required here (repository Settings > Environments)
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+    env:
+      # Set these in GitHub -> Settings -> Secrets and variables -> Actions. Until EC2_HOST is set,
+      # only the image publishing runs and the deploy steps are skipped, so the pipeline stays green.
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: images
+      - run: docker load -i images.tar
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The images that passed every check are retagged with the commit SHA and pushed. Nothing is rebuilt.
+      - name: Push the tested images to the registry
+        run: |
+          prefix="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/campus-connect"
+          for service in backend frontend proxy; do
+            docker tag "${prefix}-${service}:ci" "${prefix}-${service}:${GITHUB_SHA}"
+            docker tag "${prefix}-${service}:ci" "${prefix}-${service}:latest"
+            docker push "${prefix}-${service}:${GITHUB_SHA}"
+            docker push "${prefix}-${service}:latest"
+          done
+
+      - name: Check deploy secrets are configured
+        if: env.EC2_HOST == ''
+        run: echo "::warning::EC2_HOST secret is not set - images were published but the deploy is skipped"
+
+      - name: Install Ansible
+        if: env.EC2_HOST != ''
+        run: pip install ansible-core
+
+      - name: Prepare SSH access and the inventory
+        if: env.EC2_HOST != ''
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/deploy_key"
+          printf '[web]\n%s ansible_user=ubuntu ansible_ssh_private_key_file=%s/deploy_key ansible_ssh_common_args="-o StrictHostKeyChecking=no"\n' \
+            "$EC2_HOST" "$HOME" > "$HOME/inventory.ini"
+
+      - name: Remember which version is running now (for rollback)
+        id: previous
+        if: env.EC2_HOST != ''
+        run: |
+          tag=$(ssh -i "$HOME/deploy_key" -o StrictHostKeyChecking=no -o ConnectTimeout=20 "ubuntu@${EC2_HOST}" \
+            "grep '^IMAGE_TAG=' campus-connect/.env | cut -d= -f2" 2>/dev/null || true)
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Currently running: ${tag:-nothing recorded}"
+
+      - name: Deploy this commit with Ansible
+        if: env.EC2_HOST != ''
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_PIPELINING=True \
+            ansible-playbook -i "$HOME/inventory.ini" ansible/deploy.yml \
+              -e image_tag="${GITHUB_SHA}" \
+              -e git_ref="${GITHUB_SHA}" \
+              -e registry="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" \
+              -e repo_url="https://github.com/${GITHUB_REPOSITORY}.git"
+
+      - name: Smoke test the live site
+        id: smoke
+        if: env.EC2_HOST != ''
+        run: ./scripts/smoke_test.sh "http://${EC2_HOST}"
+
+      - name: Roll back to the previous version if the live smoke test failed
+        if: failure() && steps.smoke.outcome == 'failure' && steps.previous.outputs.tag != ''
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+        run: |
+          ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_PIPELINING=True \
+            ansible-playbook -i "$HOME/inventory.ini" ansible/deploy.yml \
+              -e image_tag="${PREVIOUS_TAG}" \
+              -e git_ref="${PREVIOUS_TAG}" \
+              -e registry="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" \
+              -e repo_url="https://github.com/${GITHUB_REPOSITORY}.git"
+          echo "::warning::The deployment failed its smoke test and was rolled back to ${PREVIOUS_TAG}"

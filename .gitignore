@@ -38,3 +38,5 @@ Thumbs.db
 .idea/
 
 backend-test.env
+# Test coverage output
+coverage/

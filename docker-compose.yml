@@ -1,35 +1,87 @@
+# The application: MongoDB + Express API + Next.js frontend + nginx entry point.
+#
+#   cp .env.example .env          # first time only
+#   docker compose up --build -d  # build locally and start
+#
+# On the server (and in CI) the images are NOT built: they are pulled from the registry
+# by commit tag, using REGISTRY and IMAGE_TAG from .env.
+#
+# Only nginx (port 80) is published. The API, the frontend server and MongoDB are reachable
+# only inside the Docker network.
+
 services:
+  mongodb:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongodb_data:/data/db
+    # Lets the backend wait until MongoDB is really ready (not just started)
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   backend:
-    build:
-      context: ./backend
-    container_name: campus-connect-backend
-    ports:
-      - "4000:4000"
-    env_file:
-      - backend-test.env
+    build: ./backend
+    # CI builds this image, tags it with the git commit and pushes it; the server pulls that exact tag
+    image: ${REGISTRY:-ghcr.io/nehal-kongwad}/campus-connect-backend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
     environment:
+      NODE_ENV: production
+      PORT: "4000"
       MONGODB_URI: mongodb://mongodb:27017/departmentMS
-      FRONTEND_URL: http://${EC2_PUBLIC_IP}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required - copy .env.example to .env}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost}
+    volumes:
+      - uploads_data:/app/uploads
     depends_on:
-      - mongodb
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4000/api/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   frontend:
     build:
       context: ./frontend
       args:
-        NEXT_PUBLIC_API_URL: http://${EC2_PUBLIC_IP}:4000/api
-    container_name: campus-connect-frontend
-    ports:
-      - "80:3000"
+        NEXT_PUBLIC_API_URL: /api
+    image: ${REGISTRY:-ghcr.io/nehal-kongwad}/campus-connect-frontend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
-  mongodb:
-    image: mongo:7
-    container_name: campus-connect-mongodb
-    volumes:
-      - mongodb_data:/data/db
+  proxy:
+    build: ./nginx
+    image: ${REGISTRY:-ghcr.io/nehal-kongwad}/campus-connect-proxy:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      DNS_RESOLVER: 127.0.0.11   # Docker's built-in DNS
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
 volumes:
   mongodb_data:
+  uploads_data:
