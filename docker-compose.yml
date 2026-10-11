@@ -69,6 +69,8 @@ services:
     restart: unless-stopped
     environment:
       DNS_RESOLVER: 127.0.0.11   # Docker's built-in DNS
+      BACKEND_HOST: backend
+      FRONTEND_HOST: frontend
     depends_on:
       backend:
         condition: service_healthy

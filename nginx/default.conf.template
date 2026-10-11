@@ -5,6 +5,9 @@
 #   everything  -> Next.js frontend
 #
 # ${DNS_RESOLVER} is 127.0.0.11 under Docker Compose and the cluster DNS under Kubernetes.
+# ${BACKEND_HOST} and ${FRONTEND_HOST} are the service names: short names under Docker Compose, full
+# names (backend.campus-connect.svc.cluster.local) under Kubernetes, because nginx's resolver does not
+# apply the cluster's DNS search domains.
 # Using a resolver plus variables makes nginx look the names up again at request time,
 # so a restarted backend container is found again without restarting nginx.
 
@@ -15,8 +18,8 @@ server {
     client_max_body_size 12m;          # course materials are limited to 10 MB by the backend
 
     resolver ${DNS_RESOLVER} valid=10s ipv6=off;
-    set $backend_upstream  http://backend:4000;
-    set $frontend_upstream http://frontend:3000;
+    set $backend_upstream  http://${BACKEND_HOST}:4000;
+    set $frontend_upstream http://${FRONTEND_HOST}:3000;
 
     location = /healthz {
         access_log off;

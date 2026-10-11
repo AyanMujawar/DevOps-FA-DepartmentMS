@@ -26,6 +26,11 @@ spec:
           env:
             - name: DNS_RESOLVER      # the cluster DNS (Docker Compose uses 127.0.0.11)
               value: kube-dns.kube-system.svc.cluster.local
+            # full service names: nginx's resolver does not apply the cluster's DNS search domains
+            - name: BACKEND_HOST
+              value: backend.campus-connect.svc.cluster.local
+            - name: FRONTEND_HOST
+              value: frontend.campus-connect.svc.cluster.local
           ports:
             - containerPort: 80
           readinessProbe:
