@@ -64,11 +64,57 @@ jobs:
         with:
           context: ./backend
           push: true
-          tags: nehalkongwad07/campus-connect-backend:latest
+          tags: |
+            nehalkongwad07/campus-connect-backend:latest
+            nehalkongwad07/campus-connect-backend:${{ github.sha }}
 
       - name: Build and Push Frontend Image
         uses: docker/build-push-action@v6
         with:
           context: ./frontend
           push: true
-          tags: nehalkongwad07/campus-connect-frontend:latest
+          tags: |
+            nehalkongwad07/campus-connect-frontend:latest
+            nehalkongwad07/campus-connect-frontend:${{ github.sha }}
+
+  deploy-to-ec2:
+    name: Deploy to EC2 Kubernetes
+    runs-on: ubuntu-latest
+    needs: publish-images
+    if: github.event_name == 'push' && github.ref == 'refs/heads/fa2-devops'
+
+    steps:
+      - name: Deploy with Helm
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: 13.60.44.173
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          timeout: 60s
+          command_timeout: 5m
+          script: |
+            set -e
+
+            echo "Checking Kubernetes cluster..."
+            sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl get nodes
+
+            echo "Deploying application with Helm..."
+            sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm upgrade --install campus-connect /home/ubuntu/helm-campus-connect-updated \
+              --namespace campus-connect \
+              --set backend.image.repository=nehalkongwad07/campus-connect-backend \
+              --set-string backend.image.tag=${{ github.sha }} \
+              --set backend.image.pullPolicy=Always \
+              --set frontend.image.repository=nehalkongwad07/campus-connect-frontend \
+              --set-string frontend.image.tag=${{ github.sha }} \
+              --set frontend.image.pullPolicy=Always
+
+            echo "Waiting for backend rollout..."
+            sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl rollout status deployment/campus-connect-backend -n campus-connect --timeout=180s
+
+            echo "Waiting for frontend rollout..."
+            sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl rollout status deployment/campus-connect-frontend -n campus-connect --timeout=180s
+
+            echo "Checking application pods..."
+            sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl get pods -n campus-connect
+
+            echo "Deployment completed successfully."
