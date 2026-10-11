@@ -1,0 +1,19 @@
+# Kustomize lists the files that make up the app, so one command deploys everything:
+#   scripts/k8s-deploy.sh        (or:  kubectl apply -k k8s/ )
+# "images" is where the image tag is set; CI swaps in the exact images it just built.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - config.yaml
+  - mongodb.yaml
+  - backend.yaml
+  - frontend.yaml
+  - proxy.yaml
+images:
+  - name: ghcr.io/nehal-kongwad/campus-connect-backend
+    newTag: latest
+  - name: ghcr.io/nehal-kongwad/campus-connect-frontend
+    newTag: latest
+  - name: ghcr.io/nehal-kongwad/campus-connect-proxy
+    newTag: latest

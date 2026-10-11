@@ -1,13 +1,37 @@
+---
+# Configures the EC2 server and deploys the app + monitoring stack.
+#
+# Run by the CI/CD pipeline after every successful push to main, or by hand:
+#   export JWT_SECRET=... GRAFANA_ADMIN_PASSWORD=...
+#   ansible-playbook -i inventory.ini deploy.yml -e image_tag=<git-sha>
+#
+# It is idempotent: running it twice changes nothing the second time.
+
 - name: Configure and deploy Campus Connect
-  hosts: web
+  hosts: all
   become: true
 
   vars:
-    app_dir: /home/ubuntu/campus-connect
     repo_url: https://github.com/Nehal-Kongwad/DevOps-FA-DepartmentMS.git
-    backend_env_src: /mnt/c/Users/Nehal/Documents/DevOps-FA-DepartmentMS/backend-test.env
+    app_dir: /home/ubuntu/campus-connect
+    git_ref: main                          # the pipeline passes the exact commit being deployed
+    registry: ghcr.io/nehal-kongwad        # the pipeline passes the registry the images were pushed to
+    image_tag: latest                      # the pipeline passes the git-sha tag of the tested images
+    compose_files: "-f docker-compose.yml -f docker-compose.monitoring.yml"
+    public_host: "{{ inventory_hostname }}"   # address users open in the browser (used for the CORS allow-list)
+    jwt_secret: "{{ lookup('env', 'JWT_SECRET') }}"
+    grafana_admin_password: "{{ lookup('env', 'GRAFANA_ADMIN_PASSWORD') }}"
+    registry_user: "{{ lookup('env', 'REGISTRY_USER') }}"
+    registry_token: "{{ lookup('env', 'REGISTRY_TOKEN') }}"
 
   tasks:
+
+    - name: Make sure the required secrets were provided
+      ansible.builtin.assert:
+        that:
+          - jwt_secret | length >= 16
+          - grafana_admin_password | length > 0
+        fail_msg: "Set JWT_SECRET (16+ characters) and GRAFANA_ADMIN_PASSWORD as environment variables"
 
     - name: Update package list
       ansible.builtin.apt:
@@ -59,6 +83,44 @@
         state: started
         enabled: true
 
+    - name: Add the ubuntu user to the docker group
+      ansible.builtin.user:
+        name: ubuntu
+        groups: docker
+        append: true
+
+    # A small cloud instance running MongoDB + Node + nginx + monitoring can run low on memory under
+    # load. A swap file gives the kernel breathing room instead of the OOM killer stopping services.
+    # This task is idempotent (checks first, safe to run on every deploy).
+    - name: Check if a swap file already exists
+      ansible.builtin.stat:
+        path: /swapfile
+      register: swap_file_check
+
+    - name: Create a 2 GB swap file
+      ansible.builtin.command: fallocate -l 2G /swapfile
+      when: not swap_file_check.stat.exists
+
+    - name: Set swap file permissions
+      ansible.builtin.file:
+        path: /swapfile
+        mode: '0600'
+      when: not swap_file_check.stat.exists
+
+    - name: Format the swap file
+      ansible.builtin.command: mkswap /swapfile
+      when: not swap_file_check.stat.exists
+
+    - name: Enable the swap file
+      ansible.builtin.command: swapon /swapfile
+      when: not swap_file_check.stat.exists
+
+    - name: Make swap permanent across reboots
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        line: "/swapfile none swap sw 0 0"
+        state: present
+
     - name: Create application directory
       ansible.builtin.file:
         path: "{{ app_dir }}"
@@ -67,41 +129,55 @@
         group: ubuntu
         mode: '0755'
 
-    - name: Clone Campus Connect repository
+    - name: Fetch the project files (compose files + monitoring config) at the deployed commit
       become_user: ubuntu
       ansible.builtin.git:
         repo: "{{ repo_url }}"
         dest: "{{ app_dir }}"
-        version: main
+        version: "{{ git_ref }}"
         force: true
 
-    - name: Copy backend environment file
-      ansible.builtin.copy:
-        src: "{{ backend_env_src }}"
-        dest: "{{ app_dir }}/backend-test.env"
-        owner: ubuntu
-        group: ubuntu
-        mode: '0600'
-
-    - name: Create EC2 environment file
-      ansible.builtin.copy:
+    # The .env file holds the real secrets. It is created on the server only - never stored in git.
+    - name: Write the .env file with secrets and the image tag to deploy
+      ansible.builtin.template:
+        src: env.j2
         dest: "{{ app_dir }}/.env"
-        content: |
-          EC2_PUBLIC_IP={{ ansible_host }}
         owner: ubuntu
         group: ubuntu
         mode: '0600'
 
-    - name: Build and start Campus Connect
-      ansible.builtin.command:
-        cmd: docker compose up --build -d
+    - name: Log in to the container registry so the server can pull the images
+      ansible.builtin.shell: echo "{{ registry_token }}" | docker login ghcr.io -u "{{ registry_user }}" --password-stdin
+      no_log: true
+      when: registry_token | length > 0
+      changed_when: false
+
+    - name: Pull the exact image versions that passed the pipeline
+      ansible.builtin.command: docker compose {{ compose_files }} pull backend frontend proxy
+      args:
         chdir: "{{ app_dir }}"
+      changed_when: false
+
+    - name: Start (or update) all containers - nothing is built on the server
+      ansible.builtin.command: docker compose {{ compose_files }} up -d --no-build --remove-orphans
+      args:
+        chdir: "{{ app_dir }}"
+
+    - name: Wait until the API reports it is ready (MongoDB connected)
+      ansible.builtin.uri:
+        url: http://localhost/api/ready
+        status_code: 200
+      register: ready_check
+      retries: 30
+      delay: 5
+      until: ready_check.status == 200
 
     - name: Show running containers
       ansible.builtin.command:
-        cmd: docker compose ps
+        cmd: docker compose {{ compose_files }} ps
         chdir: "{{ app_dir }}"
       register: compose_status
+      changed_when: false
 
     - name: Display container status
       ansible.builtin.debug:

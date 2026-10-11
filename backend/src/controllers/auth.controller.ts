@@ -3,6 +3,7 @@ import { User } from "../models/User";
 import { hashPassword, comparePassword, generateToken } from "../utils/auth";
 import jwt, { JwtPayload } from "jsonwebtoken";
 import { sendResponse } from "../utils/responseHandler";
+import { loginAttempts, registrations } from "../utils/observability";
 
 type AsyncRequestHandler = (
   req: Request,
@@ -25,6 +26,7 @@ export const registerUser: AsyncRequestHandler = async (req, res, next) => {
     const hashedPassword = await hashPassword(password);
     const newUser = new User({ name, email, password: hashedPassword, role });
     await newUser.save();
+    registrations.inc({ role: String(role) });
 
     sendResponse(res, 201, false, "User registered successfully", null);
     return;
@@ -39,6 +41,7 @@ export const loginUser: AsyncRequestHandler = async (req, res) => {
     const user = await User.findOne({ email }).select("+password");
 
     if (!user) {
+      loginAttempts.inc({ outcome: "failure" });
       sendResponse(res, 404, false, "User not found", null);
       return;
     }
@@ -46,6 +49,7 @@ export const loginUser: AsyncRequestHandler = async (req, res) => {
     const isMatch = await comparePassword(password, user.password);
 
     if (!isMatch) {
+      loginAttempts.inc({ outcome: "failure" });
       sendResponse(res, 401, false, "Invalid credentials", null);
       return;
     }
@@ -53,6 +57,7 @@ export const loginUser: AsyncRequestHandler = async (req, res) => {
     const userObject = user.toObject();
     delete userObject.password;
     const token = generateToken(userObject);
+    loginAttempts.inc({ outcome: "success" });
 
     sendResponse(res, 200, true, "Login successful", {
       user: userObject,

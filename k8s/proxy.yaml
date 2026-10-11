@@ -1,0 +1,65 @@
+# nginx: the single entry point. Sends /api to the backend and everything else to the frontend.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: proxy
+  namespace: campus-connect
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: proxy
+  template:
+    metadata:
+      labels:
+        app: proxy
+    spec:
+      containers:
+        - name: proxy
+          image: ghcr.io/nehal-kongwad/campus-connect-proxy:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DNS_RESOLVER      # the cluster DNS (Docker Compose uses 127.0.0.11)
+              value: kube-dns.kube-system.svc.cluster.local
+            # full service names: nginx's resolver does not apply the cluster's DNS search domains
+            - name: BACKEND_HOST
+              value: backend.campus-connect.svc.cluster.local
+            - name: FRONTEND_HOST
+              value: frontend.campus-connect.svc.cluster.local
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 25m, memory: 16Mi }
+            limits: { memory: 64Mi }
+---
+# NodePort exposes the site outside the cluster on port 30080 of every node
+# (on a cloud cluster you would use a LoadBalancer or an Ingress instead)
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxy
+  namespace: campus-connect
+spec:
+  type: NodePort
+  selector:
+    app: proxy
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30080

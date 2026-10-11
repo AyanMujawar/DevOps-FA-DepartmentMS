@@ -1,0 +1,62 @@
+# MongoDB: one pod + a PersistentVolumeClaim so the data survives pod restarts.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mongodb-data
+  namespace: campus-connect
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb
+  namespace: campus-connect
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate        # a database volume can only be used by one pod at a time
+  selector:
+    matchLabels:
+      app: mongodb
+  template:
+    metadata:
+      labels:
+        app: mongodb
+    spec:
+      containers:
+        - name: mongodb
+          image: mongo:7
+          ports:
+            - containerPort: 27017
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+          readinessProbe:
+            exec:
+              command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 768Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mongodb-data
+---
+# A Service gives the pod a stable DNS name ("mongodb") that the backend connects to
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: campus-connect
+spec:
+  selector:
+    app: mongodb
+  ports:
+    - port: 27017

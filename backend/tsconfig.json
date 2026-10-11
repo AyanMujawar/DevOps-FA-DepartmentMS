@@ -6,7 +6,15 @@
     "moduleResolution": "node",
     "sourceMap": true,
     "outDir": "dist",
-    "typeRoots": ["./src/@types", "./node_modules/@types"]
+    "typeRoots": [
+      "./src/@types",
+      "./node_modules/@types"
+    ]
   },
-  "lib": ["es2015"]
+  "lib": [
+    "es2015"
+  ],
+  "include": [
+    "src/**/*"
+  ]
 }

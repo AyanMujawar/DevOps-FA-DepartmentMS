@@ -1,6 +1,7 @@
 import { RequestHandler } from "express";
 import { Course } from "../models/Course";
 import { sendResponse } from "../utils/responseHandler";
+import { enrollments } from "../utils/observability";
 
 export const createCourse: RequestHandler = async (req, res) => {
   try {
@@ -169,6 +170,7 @@ export const enrollStudent: RequestHandler = async (req, res) => {
       sendResponse(res, 404, false, "Course not found", null);
       return;
     }
+    enrollments.inc();
     sendResponse(res, 200, true, "Student enrolled successfully", course);
     return;
   } catch (error) {
